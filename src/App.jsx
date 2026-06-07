@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { QRCodeSVG } from "qrcode.react";
 
 /* =====================================================================
    LU'S SCORECARD (writer · game data) + LU'S SCOREBOARD (read-only)
@@ -114,10 +115,15 @@ const Style = () => (
 
 /* ===================================================================== */
 
+const initialWatch = (() => {
+  try { return (new URLSearchParams(window.location.search).get("watch") || "").trim().toUpperCase(); }
+  catch (e) { return ""; }
+})();
+
 export default function App() {
-  const [role, setRole] = useState(null); // null | "score" | "watch"
+  const [role, setRole] = useState(initialWatch ? "watch" : null); // null | "score" | "watch"
   if (role === "score") return <Scorecard onExit={() => setRole(null)} />;
-  if (role === "watch") return <Mirror onExit={() => setRole(null)} />;
+  if (role === "watch") return <Mirror onExit={() => setRole(null)} initialCode={initialWatch} />;
   return <RolePicker onPick={setRole} />;
 }
 
@@ -150,9 +156,9 @@ function RolePicker({ onPick }) {
 
 /* =========================== SCORE (writer) =========================== */
 /* =========================== WATCH (mirror) =========================== */
-function Mirror({ onExit }) {
-  const [code, setCode] = useState("");
-  const [entry, setEntry] = useState("");
+function Mirror({ onExit, initialCode }) {
+  const [code, setCode] = useState(initialCode || "");
+  const [entry, setEntry] = useState(initialCode || "");
   const [game, setGame] = useState(null);
   const [diag, setDiag] = useState(null); // { reason } from last fetch
   const [diagDetail, setDiagDetail] = useState("");
@@ -551,6 +557,7 @@ function Scorecard({ onExit }) {
   const [bases, setBases] = useState({ first: false, second: false, third: false });
   const [history, setHistory] = useState([]);
   const [confirm, setConfirm] = useState(null);
+  const [showQR, setShowQR] = useState(false);
   const [gameCode, setGameCode] = useState('');
   const noRunners = { first: false, second: false, third: false };
 
@@ -967,6 +974,8 @@ function Scorecard({ onExit }) {
     );
   }
 
+  const watchUrl = gameCode ? `${window.location.origin}${window.location.pathname}?watch=${encodeURIComponent(gameCode)}` : "";
+
   return (
     <div style={{ minHeight: '100vh', background: '#05080B', display: 'flex', justifyContent: 'center', alignItems: 'flex-start', padding: 16, fontFamily: 'system-ui, -apple-system, sans-serif' }}>
       <style>{`.tap{transition:opacity .12s} .tap:active{opacity:.7} input:focus{outline:none;border-color:${SC.run}!important}`}</style>
@@ -980,9 +989,26 @@ function Scorecard({ onExit }) {
             <span style={{ color: SC.muted, fontSize: 11, fontWeight: 800, letterSpacing: 1 }}>SCOREBOARD CODE</span>
             <span style={{ color: SC.text, fontSize: 14, fontWeight: 900, letterSpacing: 2 }}>{gameCode}</span>
             {!SB_READY && <span style={{ color: SC.danger, fontSize: 10, fontWeight: 800 }}>· offline</span>}
+            <button className="tap" onClick={() => setShowQR(true)} style={{ marginLeft: 6, background: SC.run, color: SC.bg, border: 'none', borderRadius: 6, padding: '4px 10px', fontSize: 11, fontWeight: 900, letterSpacing: 1, cursor: 'pointer' }}>SHOW QR</button>
           </div>
         )}
         {body}
+        {showQR && gameCode && (
+          <div onClick={() => setShowQR(false)} style={{ position: 'fixed', inset: 0, background: '#000000DD', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, zIndex: 30 }}>
+            <div onClick={(e) => e.stopPropagation()} style={{ background: '#fff', borderRadius: 20, padding: '24px 24px 18px', width: '100%', maxWidth: 360, textAlign: 'center', boxShadow: '0 24px 60px rgba(0,0,0,0.55)' }}>
+              <div style={{ color: '#0A0E12', fontSize: 21, fontWeight: 900, letterSpacing: 1 }}>SCAN TO WATCH</div>
+              <div style={{ color: '#5b6675', fontSize: 14, fontWeight: 700, marginTop: 4, marginBottom: 16 }}>Opens Lu's Scoreboard for this game</div>
+              <div style={{ display: 'flex', justifyContent: 'center' }}>
+                <div style={{ background: '#fff', padding: 12, borderRadius: 12, border: '1px solid #e3e8ee' }}>
+                  <QRCodeSVG value={watchUrl} size={232} level="M" />
+                </div>
+              </div>
+              <div style={{ color: '#0A0E12', fontSize: 30, fontWeight: 900, letterSpacing: 3, marginTop: 16 }}>{gameCode}</div>
+              <div style={{ color: '#5b6675', fontSize: 12, fontWeight: 600, marginTop: 6, wordBreak: 'break-all' }}>{watchUrl}</div>
+              <button className="tap" onClick={() => setShowQR(false)} style={{ marginTop: 18, width: '100%', border: 'none', borderRadius: 12, padding: '14px 0', background: '#0A0E12', color: '#fff', fontSize: 16, fontWeight: 800, cursor: 'pointer' }}>DONE</button>
+            </div>
+          </div>
+        )}
         {confirm && (
           <div style={{ position: 'absolute', inset: 0, background: '#000000AA', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 28 }}>
             <div style={{ background: SC.surface, borderRadius: 18, border: `1px solid ${SC.border}`, padding: 20, width: '100%' }}>
