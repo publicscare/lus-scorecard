@@ -648,6 +648,24 @@ function Scorecard({ onExit }) {
       if (on) { const np = p + k; if (np >= 4) runs += 1; else occupy(np); }
     });
     occupy(k);
+    // If this is a single and there is a runner on 2nd, sometimes that
+    // runner can score on the play — ask the scorer to confirm.
+    if (k === 1 && bases.second) {
+      ask('Runner on 2nd', 'Did the runner score on the single, or hold at 3rd?', () => {
+        // Confirmed: treat the runner on 2nd as scored instead of moved to 3rd.
+        const nb2 = { ...nb };
+        // Remove the runner that would have occupied 3rd from the 2nd-to-3rd advance.
+        nb2.third = false;
+        addCappedRuns(runs + 1);
+        setBases(nb2);
+      }, { onCancel: () => {
+        // Canceled/hold: leave as computed (runner to 3rd)
+        addCappedRuns(runs);
+        setBases(nb);
+      }, confirmLabel: 'SCORE', cancelLabel: 'HOLD' });
+      return;
+    }
+
     addCappedRuns(runs);
     setBases(nb);
   };
