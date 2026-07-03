@@ -62,14 +62,15 @@ const SB_REST = `${SUPABASE_URL}/rest/v1/games`;
 const SB_HEADERS = { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json" };
 
 async function publishGame(code, contract) {
-  if (!SB_READY || !code) return;
+  if (!SB_READY || !code) return false;
   try {
-    await fetch(SB_REST, {
+    const res = await fetch(SB_REST, {
       method: "POST",
       headers: { ...SB_HEADERS, Prefer: "resolution=merge-duplicates,return=minimal" },
       body: JSON.stringify({ code, state: contract }),
     });
-  } catch (e) {}
+    return res.ok;
+  } catch (e) { return false; }
 }
 // Returns { ok, game, reason } so the UI can show WHY it's waiting.
 async function fetchGame(code) {
@@ -164,6 +165,7 @@ function Mirror({ onExit, initialCode }) {
   const [diagDetail, setDiagDetail] = useState("");
   const [visible, setVisible] = useState(null); // game codes this device can see
   const [now, setNow] = useState(Date.now());
+  const [lastOkAt, setLastOkAt] = useState(Date.now()); // last successful fetch (connection health)
   const [theme, setTheme] = useState("dark");
   const [landscape, setLandscape] = useState(false);
   const wakeRef = useRef(null);
@@ -183,17 +185,33 @@ function Mirror({ onExit, initialCode }) {
   useEffect(() => {
     if (!code) return;
     let alive = true;
+    let timer = null;
+    let lastRaw = "";
+    let lastChangeAt = Date.now();
+    const schedule = (ms) => { if (alive) timer = setTimeout(tick, ms); };
     const tick = async () => {
+      if (!alive) return;
+      // Tab hidden: don't hit the network; visibilitychange re-ticks on return.
+      if (typeof document !== "undefined" && document.hidden) { schedule(5000); return; }
       const res = await fetchGame(code);
       if (!alive) return;
       setGame(res.game || null);
       setDiag(res.reason);
       setDiagDetail(res.detail || "");
+      if (res.ok) setLastOkAt(Date.now());
+      const raw = res.game ? JSON.stringify(res.game) : "";
+      if (raw !== lastRaw) { lastRaw = raw; lastChangeAt = Date.now(); }
       if (!res.game) { const codes = await listGameCodes(); if (alive) setVisible(codes); }
+      // Back off when nothing is happening: final games poll every 10s,
+      // games idle for over a minute every 5s, active games every 1.2s.
+      const isFinalNow = !!(res.game && res.game.status === "final");
+      const idle = Date.now() - lastChangeAt > 60000;
+      schedule(isFinalNow ? 10000 : idle ? 5000 : 1200);
     };
+    const onVis = () => { if (typeof document !== "undefined" && !document.hidden) { clearTimeout(timer); tick(); } };
+    document.addEventListener("visibilitychange", onVis);
     tick();
-    const id = setInterval(tick, 1200);
-    return () => { alive = false; clearInterval(id); };
+    return () => { alive = false; clearTimeout(timer); document.removeEventListener("visibilitychange", onVis); };
   }, [code]);
 
   useEffect(() => { const id = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id); }, []);
@@ -285,7 +303,9 @@ function Mirror({ onExit, initialCode }) {
   const isFinal = game.status === "final";
   const leader = game.awayRuns > game.homeRuns ? "away" : game.homeRuns > game.awayRuns ? "home" : null;
   const secsAgo = Math.max(0, Math.round((now - (game.updatedAt || now)) / 1000));
-  const stale = !isFinal && secsAgo > 15;
+  // updatedAt is now honest (only bumps on real score changes), so quiet play
+  // legitimately ages. "Stale" therefore tracks connection health instead.
+  const stale = !isFinal && now - lastOkAt > 15000;
   const away = (game.awayName || "AWAY").trim() || "AWAY";
   const home = (game.homeName || "HOME").trim() || "HOME";
 
@@ -299,7 +319,7 @@ function Mirror({ onExit, initialCode }) {
           <span style={{ fontFamily: FF, fontSize: 17, fontWeight: 700, color: C.text, letterSpacing: 2 }}>LIVE</span>
         </span>
       )}
-      <span style={{ fontFamily: FF, fontSize: 15, fontWeight: 700, color: stale ? C.danger : C.muted }}>{stale && "⚠ "}updated {abbrAgo(secsAgo)}</span>
+      <span style={{ fontFamily: FF, fontSize: 15, fontWeight: 700, color: stale ? C.danger : C.muted }}>{stale ? "⚠ reconnecting… · " : ""}updated {abbrAgo(secsAgo)}</span>
     </div>
   );
 
@@ -516,8 +536,11 @@ function Toggle({ on, onChange }) {
 
 /* Senior Softball Scorecard — web preview (mirrors the Expo app).
    Scoring per Senior Softball-USA / USSSA / ISSA rules.
-   Note: preferences are in-memory here (artifacts can't use browser storage). */
+   Game + preferences persist to localStorage and restore after a refresh. */
 
+const SC_STORE_KEY = 'lus.scorecard.v1';
+const SC_UNLOCK_KEY = 'lus.scorecard.unlocked';
+const SC_PASSWORD = 'softball'; // client-side gate only — visible in source, keeps casual users out
 const OUTS_PER_HALF = 3;
 const DEFAULTS = { hrLimit: 6, innings: 7, runCap: 5, openLastInning: true };
 const LIMITS = {
@@ -557,8 +580,16 @@ function Scorecard({ onExit }) {
   const [bases, setBases] = useState({ first: false, second: false, third: false });
   const [history, setHistory] = useState([]);
   const [confirm, setConfirm] = useState(null);
+  const [runnerMenu, setRunnerMenu] = useState(null); // 'first' | 'second' | 'third' | null
   const [showQR, setShowQR] = useState(false);
   const [gameCode, setGameCode] = useState('');
+  const [unlocked, setUnlocked] = useState(() => { try { return localStorage.getItem(SC_UNLOCK_KEY) === '1'; } catch (e) { return false; } });
+  const [pw, setPw] = useState('');
+  const [pwErr, setPwErr] = useState(false);
+  const [syncFail, setSyncFail] = useState(false); // last publish to Supabase failed
+  const [hydrated, setHydrated] = useState(false); // localStorage restore finished
+  const lastPubRef = useRef('');                   // serialized last-published contract
+  const contractRef = useRef(null);                // current contract (for retries)
   const noRunners = { first: false, second: false, third: false };
 
   const { hrLimit, innings, runCap: runCapPerInning, openLastInning } = settings;
@@ -582,19 +613,45 @@ function Scorecard({ onExit }) {
   const awayRuns = sumArr(awayInn);
   const homeRuns = sumArr(homeInn);
 
-  // ---- READ-ONLY MIRROR FEED: publish the contract to shared storage ----
+  // ---- READ-ONLY MIRROR FEED ----
+  // Publish only when the contract *content* changes, so updatedAt is honest:
+  // it means "the score last changed then", not "this tab last re-rendered then".
+  const liveContract = (phase === 'game' || phase === 'over') ? {
+    awayName: aName, homeName: hName,
+    inning,
+    awayRuns, homeRuns,
+    awayHr: awayHR, homeHr: homeHR,
+    hrMax: hrLimit,
+    status: phase === 'over' ? 'final' : 'live',
+  } : null;
+  contractRef.current = liveContract;
+
   useEffect(() => {
-    if (!gameCode || (phase !== 'game' && phase !== 'over')) return;
-    publishGame(gameCode, {
-      awayName: aName, homeName: hName,
-      inning,
-      awayRuns, homeRuns,
-      awayHr: awayHR, homeHr: homeHR,
-      hrMax: hrLimit,
-      status: phase === 'over' ? 'final' : 'live',
-      updatedAt: Date.now(),
+    if (!gameCode || !contractRef.current) return;
+    const key = JSON.stringify(contractRef.current);
+    if (key === lastPubRef.current) return; // nothing actually changed
+    let alive = true;
+    publishGame(gameCode, { ...contractRef.current, updatedAt: Date.now() }).then((ok) => {
+      if (!alive) return;
+      if (ok) { lastPubRef.current = key; setSyncFail(false); }
+      else if (SB_READY) setSyncFail(true);
     });
+    return () => { alive = false; };
   }, [gameCode, phase, awayInn, homeInn, awayHR, homeHR, hrLimit, awayName, homeName, inning]);
+
+  // While a publish is failing, retry every 5s so a dropped connection
+  // recovers on its own instead of waiting for the next scored run.
+  useEffect(() => {
+    if (!syncFail || !gameCode) return;
+    const id = setInterval(() => {
+      const c = contractRef.current;
+      if (!c) return;
+      publishGame(gameCode, { ...c, updatedAt: Date.now() }).then((ok) => {
+        if (ok) { lastPubRef.current = JSON.stringify(c); setSyncFail(false); }
+      });
+    }, 5000);
+    return () => clearInterval(id);
+  }, [syncFail, gameCode]);
 
   useEffect(() => {
     let lock = null;
@@ -603,6 +660,44 @@ function Scorecard({ onExit }) {
     if (phase === 'game' || phase === 'over') { acquire(); document.addEventListener('visibilitychange', onVis); }
     return () => { document.removeEventListener('visibilitychange', onVis); try { lock && lock.release(); } catch (e) {} };
   }, [phase]);
+
+  // ---- PERSISTENCE: survive a refresh / phone sleep mid-game ----
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(SC_STORE_KEY);
+      if (raw) {
+        const g = JSON.parse(raw);
+        if (g && typeof g === 'object') {
+          if (g.settings && typeof g.settings === 'object') setSettings((s) => ({ ...s, ...g.settings }));
+          if (typeof g.awayName === 'string') setAwayName(g.awayName);
+          if (typeof g.homeName === 'string') setHomeName(g.homeName);
+          if (Array.isArray(g.awayInn)) setAwayInn(g.awayInn);
+          if (Array.isArray(g.homeInn)) setHomeInn(g.homeInn);
+          if (Number.isFinite(g.awayHR)) setAwayHR(g.awayHR);
+          if (Number.isFinite(g.homeHR)) setHomeHR(g.homeHR);
+          if (Number.isFinite(g.inning)) setInning(g.inning);
+          if (g.half === 'top' || g.half === 'bottom') setHalf(g.half);
+          if (Number.isFinite(g.hrThisHalf)) setHrThisHalf(g.hrThisHalf);
+          if (Number.isFinite(g.outs)) setOuts(g.outs);
+          if (g.bases && typeof g.bases === 'object') setBases({ first: !!g.bases.first, second: !!g.bases.second, third: !!g.bases.third });
+          if (Array.isArray(g.history)) setHistory(g.history);
+          if (typeof g.gameCode === 'string') setGameCode(g.gameCode);
+          if (g.phase === 'game' || g.phase === 'over') setPhase(g.phase);
+        }
+      }
+    } catch (e) {}
+    setHydrated(true);
+  }, []);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    try {
+      localStorage.setItem(SC_STORE_KEY, JSON.stringify({
+        phase, settings, awayName, homeName, awayInn, homeInn,
+        awayHR, homeHR, inning, half, hrThisHalf, outs, bases, history, gameCode,
+      }));
+    } catch (e) {}
+  }, [hydrated, phase, settings, awayName, homeName, awayInn, homeInn, awayHR, homeHR, inning, half, hrThisHalf, outs, bases, history, gameCode]);
 
   const ask = (title, message, onConfirm, opts = {}) => setConfirm({ title, message, onConfirm, onCancel: opts.onCancel, confirmLabel: opts.confirmLabel, cancelLabel: opts.cancelLabel });
   const bumpCell = (n) =>
@@ -631,7 +726,25 @@ function Scorecard({ onExit }) {
   };
 
   const addOut = () => setOuts((o) => Math.min(OUTS_PER_HALF, o + 1));
-  const toggleBase = (k) => { snapshot(); setBases((b) => ({ ...b, [k]: !b[k] })); };
+  // Tap an empty base to place a runner; tap an occupied base for the
+  // runner menu (advance / scored / out / remove) — covers first-to-third,
+  // scoring from 1st, pickoffs, and every other "the default guessed wrong" play.
+  const tapBase = (k) => {
+    if (bases[k]) { setRunnerMenu(k); return; }
+    snapshot();
+    setBases((b) => ({ ...b, [k]: true }));
+  };
+  const NEXT_BASE = { first: 'second', second: 'third' };
+  const BASE_LABEL = { first: '1st', second: '2nd', third: '3rd' };
+  const runnerAdvance = (k) => {
+    snapshot();
+    if (k === 'third') { addCappedRuns(1); setBases((b) => ({ ...b, third: false })); }
+    else { const nk = NEXT_BASE[k]; setBases((b) => ({ ...b, [k]: false, [nk]: true })); }
+    setRunnerMenu(null);
+  };
+  const runnerScored = (k) => { snapshot(); addCappedRuns(1); setBases((b) => ({ ...b, [k]: false })); setRunnerMenu(null); };
+  const runnerOut = (k) => { snapshot(); addOut(); setBases((b) => ({ ...b, [k]: false })); setRunnerMenu(null); };
+  const runnerRemove = (k) => { snapshot(); setBases((b) => ({ ...b, [k]: false })); setRunnerMenu(null); };
   const addCappedRuns = (runs) => {
     const add = isOpenInning ? runs : Math.min(runs, Math.max(0, runCapPerInning - cellRuns));
     if (add > 0) bumpCell(add);
@@ -648,24 +761,9 @@ function Scorecard({ onExit }) {
       if (on) { const np = p + k; if (np >= 4) runs += 1; else occupy(np); }
     });
     occupy(k);
-    // If this is a single and there is a runner on 2nd, sometimes that
-    // runner can score on the play — ask the scorer to confirm.
-    if (k === 1 && bases.second) {
-      ask('Runner on 2nd', 'Did the runner score on the single, or hold at 3rd?', () => {
-        // Confirmed: treat the runner on 2nd as scored instead of moved to 3rd.
-        const nb2 = { ...nb };
-        // Remove the runner that would have occupied 3rd from the 2nd-to-3rd advance.
-        nb2.third = false;
-        addCappedRuns(runs + 1);
-        setBases(nb2);
-      }, { onCancel: () => {
-        // Canceled/hold: leave as computed (runner to 3rd)
-        addCappedRuns(runs);
-        setBases(nb);
-      }, confirmLabel: 'SCORE', cancelLabel: 'HOLD' });
-      return;
-    }
-
+    // Standard advancement is applied automatically. If a runner took an
+    // extra base (first-to-third, scored from 2nd, etc.), tap that runner
+    // on the diamond and use the menu to adjust — no prompt on every play.
     addCappedRuns(runs);
     setBases(nb);
   };
@@ -739,7 +837,7 @@ function Scorecard({ onExit }) {
     const B = ({ bk, cx, cy, label }) => {
       const on = bases[bk];
       return (
-        <g onClick={() => toggleBase(bk)} className="tap" style={{ cursor: 'pointer' }}>
+        <g onClick={() => tapBase(bk)} className="tap" style={{ cursor: 'pointer' }}>
           <rect x={cx - 18} y={cy - 18} width={36} height={36} rx={6}
             transform={`rotate(45 ${cx} ${cy})`}
             fill={on ? color : SC.surface2} stroke={on ? color : SC.border} strokeWidth={2} />
@@ -994,6 +1092,40 @@ function Scorecard({ onExit }) {
 
   const watchUrl = gameCode ? `${window.location.origin}${window.location.pathname}?watch=${encodeURIComponent(gameCode)}` : "";
 
+  // ---- SCOREKEEPER GATE ----
+  if (!unlocked) {
+    const tryUnlock = () => {
+      if (pw.trim().toLowerCase() === SC_PASSWORD) {
+        try { localStorage.setItem(SC_UNLOCK_KEY, '1'); } catch (e) {}
+        setUnlocked(true); setPwErr(false);
+      } else { setPwErr(true); }
+    };
+    return (
+      <div style={{ minHeight: '100vh', background: '#05080B', display: 'flex', justifyContent: 'center', alignItems: 'center', padding: 16, fontFamily: 'system-ui, -apple-system, sans-serif' }}>
+        <style>{`.tap{transition:opacity .12s} .tap:active{opacity:.7} input:focus{outline:none;border-color:${SC.run}!important}`}</style>
+        <div style={{ width: '100%', maxWidth: 430, background: SC.bg, borderRadius: 28, border: `1px solid ${SC.border}`, padding: '40px 28px', position: 'relative' }}>
+          <button className="tap" onClick={onExit} style={{ position: 'absolute', top: 14, left: 16, background: 'none', border: 'none', color: SC.muted, fontSize: 14, fontWeight: 700, cursor: 'pointer' }}>‹ Roles</button>
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ color: SC.text, fontSize: 28, fontWeight: 800, letterSpacing: 1 }}>Lu's Scorecard</div>
+            <div style={{ color: SC.muted, fontSize: 15, marginTop: 6, marginBottom: 26 }}>Scorekeeper access — enter the password</div>
+          </div>
+          <div style={{ color: SC.muted, fontSize: 13, fontWeight: 800, letterSpacing: 1, marginBottom: 6 }}>PASSWORD</div>
+          <input
+            type="password"
+            autoComplete="off"
+            value={pw}
+            onChange={(e) => { setPw(e.target.value); setPwErr(false); }}
+            onKeyDown={(e) => { if (e.key === 'Enter') tryUnlock(); }}
+            style={{ width: '100%', boxSizing: 'border-box', background: SC.surface, border: `2px solid ${pwErr ? SC.danger : SC.border}`, borderRadius: 12, padding: '14px 16px', color: SC.text, fontSize: 22, fontWeight: 700, letterSpacing: 2, textAlign: 'center' }}
+          />
+          {pwErr && <div style={{ color: SC.danger, fontSize: 14, fontWeight: 700, marginTop: 8, textAlign: 'center' }}>That's not it — try again.</div>}
+          <button className="tap" onClick={tryUnlock} disabled={!pw.trim()} style={{ marginTop: 18, width: '100%', background: SC.run, color: SC.bg, border: 'none', borderRadius: 12, padding: '15px 0', fontSize: 20, fontWeight: 900, letterSpacing: 1, cursor: pw.trim() ? 'pointer' : 'default', opacity: pw.trim() ? 1 : 0.4 }}>UNLOCK ▸</button>
+          <div style={{ color: SC.muted, fontSize: 12, marginTop: 16, textAlign: 'center', opacity: 0.8 }}>Spectators don't need this — they use Watch with a game code.</div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={{ minHeight: '100vh', background: '#05080B', display: 'flex', justifyContent: 'center', alignItems: 'flex-start', padding: 16, fontFamily: 'system-ui, -apple-system, sans-serif' }}>
       <style>{`.tap{transition:opacity .12s} .tap:active{opacity:.7} input:focus{outline:none;border-color:${SC.run}!important}`}</style>
@@ -1007,6 +1139,7 @@ function Scorecard({ onExit }) {
             <span style={{ color: SC.muted, fontSize: 11, fontWeight: 800, letterSpacing: 1 }}>SCOREBOARD CODE</span>
             <span style={{ color: SC.text, fontSize: 14, fontWeight: 900, letterSpacing: 2 }}>{gameCode}</span>
             {!SB_READY && <span style={{ color: SC.danger, fontSize: 10, fontWeight: 800 }}>· offline</span>}
+            {SB_READY && syncFail && <span style={{ color: SC.danger, fontSize: 10, fontWeight: 800 }}>⚠ NOT SYNCING</span>}
             <button className="tap" onClick={() => setShowQR(true)} style={{ marginLeft: 6, background: SC.run, color: SC.bg, border: 'none', borderRadius: 6, padding: '4px 10px', fontSize: 11, fontWeight: 900, letterSpacing: 1, cursor: 'pointer' }}>SHOW QR</button>
           </div>
         )}
@@ -1027,6 +1160,29 @@ function Scorecard({ onExit }) {
             </div>
           </div>
         )}
+        {runnerMenu && (() => {
+          const k = runnerMenu;
+          const nk = NEXT_BASE[k];
+          const nextBlocked = nk ? bases[nk] : false;
+          const btn = (bg, fg, weight = 800) => ({ width: '100%', borderRadius: 12, padding: '15px 0', border: 'none', background: bg, color: fg, fontSize: 16, fontWeight: weight, cursor: 'pointer', marginTop: 10 });
+          return (
+            <div onClick={() => setRunnerMenu(null)} style={{ position: 'absolute', inset: 0, background: '#000000AA', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 28, zIndex: 20 }}>
+              <div onClick={(e) => e.stopPropagation()} style={{ background: SC.surface, borderRadius: 18, border: `1px solid ${SC.border}`, padding: 20, width: '100%' }}>
+                <div style={{ color: SC.text, fontSize: 20, fontWeight: 800 }}>Runner on {BASE_LABEL[k]}</div>
+                <div style={{ color: SC.muted, fontSize: 14, marginTop: 6 }}>What happened to this runner?</div>
+                {k !== 'third' && (
+                  <button className="tap" disabled={nextBlocked} onClick={() => runnerAdvance(k)} style={{ ...btn(SC.surface2, SC.text), opacity: nextBlocked ? 0.35 : 1, cursor: nextBlocked ? 'default' : 'pointer' }}>
+                    ADVANCE TO {BASE_LABEL[nk].toUpperCase()}{nextBlocked ? ' — OCCUPIED' : ''}
+                  </button>
+                )}
+                <button className="tap" onClick={() => runnerScored(k)} style={btn(SC.run, '#06231A', 900)}>SCORED{runCapReached ? ' (RUN CAP REACHED)' : ''}</button>
+                <button className="tap" onClick={() => runnerOut(k)} style={btn(SC.danger, '#2A0606', 900)}>OUT</button>
+                <button className="tap" onClick={() => runnerRemove(k)} style={{ ...btn('transparent', SC.muted, 700), border: `1px solid ${SC.border}` }}>REMOVE (MIS-TAP)</button>
+                <button className="tap" onClick={() => setRunnerMenu(null)} style={btn(SC.surface2, SC.text)}>CANCEL</button>
+              </div>
+            </div>
+          );
+        })()}
         {confirm && (
           <div style={{ position: 'absolute', inset: 0, background: '#000000AA', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 28 }}>
             <div style={{ background: SC.surface, borderRadius: 18, border: `1px solid ${SC.border}`, padding: 20, width: '100%' }}>
