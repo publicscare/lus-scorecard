@@ -566,6 +566,7 @@ const ordinal = (n) => {
 
 function Scorecard({ onExit }) {
   const [phase, setPhase] = useState('setup');
+  const [scoreMode, setScoreMode] = useState('detailed'); // 'detailed' | 'quick'
   const [settings, setSettings] = useState(DEFAULTS);
   const [awayName, setAwayName] = useState('');
   const [homeName, setHomeName] = useState('');
@@ -676,6 +677,7 @@ function Scorecard({ onExit }) {
           if (Number.isFinite(g.awayHR)) setAwayHR(g.awayHR);
           if (Number.isFinite(g.homeHR)) setHomeHR(g.homeHR);
           if (Number.isFinite(g.inning)) setInning(g.inning);
+          if (g.scoreMode === 'quick' || g.scoreMode === 'detailed') setScoreMode(g.scoreMode);
           if (g.half === 'top' || g.half === 'bottom') setHalf(g.half);
           if (Number.isFinite(g.hrThisHalf)) setHrThisHalf(g.hrThisHalf);
           if (Number.isFinite(g.outs)) setOuts(g.outs);
@@ -693,11 +695,11 @@ function Scorecard({ onExit }) {
     if (!hydrated) return;
     try {
       localStorage.setItem(SC_STORE_KEY, JSON.stringify({
-        phase, settings, awayName, homeName, awayInn, homeInn,
+        phase, scoreMode, settings, awayName, homeName, awayInn, homeInn,
         awayHR, homeHR, inning, half, hrThisHalf, outs, bases, history, gameCode,
       }));
     } catch (e) {}
-  }, [hydrated, phase, settings, awayName, homeName, awayInn, homeInn, awayHR, homeHR, inning, half, hrThisHalf, outs, bases, history, gameCode]);
+  }, [hydrated, phase, scoreMode, settings, awayName, homeName, awayInn, homeInn, awayHR, homeHR, inning, half, hrThisHalf, outs, bases, history, gameCode]);
 
   const ask = (title, message, onConfirm, opts = {}) => setConfirm({ title, message, onConfirm, onCancel: opts.onCancel, confirmLabel: opts.confirmLabel, cancelLabel: opts.cancelLabel });
   const bumpCell = (n) =>
@@ -706,6 +708,13 @@ function Scorecard({ onExit }) {
       x[inning - 1] = Math.max(0, (x[inning - 1] || 0) + n);
       return x;
     });
+
+  // Quick-score mode has no innings/halves — runs live in cell 0 of each team's
+  // array, so awayRuns/homeRuns (sumArr) and the published contract stay correct.
+  const adjustQuick = (side, delta) => {
+    const setInn = side === 'away' ? setAwayInn : setHomeInn;
+    setInn((prev) => { const x = [...prev]; x[0] = Math.max(0, (x[0] || 0) + delta); return x; });
+  };
 
   const startGame = () => {
     setAwayInn(emptyInnings(innings)); setHomeInn(emptyInnings(innings));
@@ -917,6 +926,22 @@ function Scorecard({ onExit }) {
           <div style={{ ...SS.label, marginTop: 18 }}>HOME TEAM</div>
           <input style={SS.input} placeholder="Home" value={homeName} onChange={(e) => setHomeName(e.target.value)} maxLength={20} />
         </div>
+        <div style={SS.label}>SCORING</div>
+        <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+          {[
+            { m: 'detailed', title: 'Detailed', sub: 'play-by-play' },
+            { m: 'quick', title: 'Quick score', sub: '＋ / − runs' },
+          ].map((opt) => {
+            const on = scoreMode === opt.m;
+            return (
+              <button key={opt.m} className="tap" onClick={() => setScoreMode(opt.m)}
+                style={{ flex: 1, borderRadius: 12, padding: '12px 0', cursor: 'pointer', background: on ? SC.run + '22' : SC.surface2, border: `1.5px solid ${on ? SC.run : SC.border}` }}>
+                <div style={{ color: on ? SC.run : SC.text, fontSize: 16, fontWeight: 900, letterSpacing: 0.5 }}>{opt.title}</div>
+                <div style={{ color: on ? SC.run : SC.muted, fontSize: 11, fontWeight: 700, opacity: 0.85, marginTop: 2 }}>{opt.sub}</div>
+              </button>
+            );
+          })}
+        </div>
         <button className="tap" onClick={startGame} style={{ ...SS.bigBtn, background: SC.run }}>
           <span style={{ color: '#06231A', fontSize: 20, fontWeight: 900, letterSpacing: 1 }}>NEW GAME</span>
         </button>
@@ -990,6 +1015,36 @@ function Scorecard({ onExit }) {
           <span style={{ color: '#06231A', fontSize: 20, fontWeight: 900, letterSpacing: 1 }}>NEW GAME</span>
         </button>
       </div>
+    );
+  } else if (scoreMode === 'quick') {
+    const QuickTeam = ({ side, name, runs, color }) => (
+      <div style={{ ...SS.card, borderColor: color, marginBottom: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+          <span style={{ width: 12, height: 12, borderRadius: 6, background: color, marginRight: 8 }} />
+          <span style={{ color: SC.text, fontSize: 20, fontWeight: 800, flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{name}</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <button className="tap" onClick={() => adjustQuick(side, -1)} disabled={runs <= 0}
+            style={{ width: 72, height: 72, borderRadius: 18, border: `1.5px solid ${SC.danger}`, background: 'none', color: SC.danger, fontSize: 40, fontWeight: 900, lineHeight: 1, cursor: runs <= 0 ? 'default' : 'pointer', opacity: runs <= 0 ? 0.35 : 1 }}>−</button>
+          <div style={{ flex: 1, textAlign: 'center', fontSize: 76, fontWeight: 900, color: SC.text, lineHeight: '80px' }}>{runs}</div>
+          <button className="tap" onClick={() => adjustQuick(side, 1)}
+            style={{ width: 72, height: 72, borderRadius: 18, border: 'none', background: color, color: '#06231A', fontSize: 40, fontWeight: 900, lineHeight: 1, cursor: 'pointer' }}>＋</button>
+        </div>
+      </div>
+    );
+    body = (
+      <>
+        <Topbar
+          left={<button className="tap" onClick={newGame} style={SS.topBtn}>New Game</button>}
+          center={<span style={{ color: SC.text, fontSize: 13, fontWeight: 800, letterSpacing: 2 }}>QUICK SCORE</span>}
+          right={<button className="tap" onClick={endGame} style={{ ...SS.topBtn, color: SC.danger }}>End Game</button>}
+        />
+        <div style={{ padding: 18 }}>
+          <QuickTeam side="away" name={aName} runs={awayRuns} color={SC.away} />
+          <QuickTeam side="home" name={hName} runs={homeRuns} color={SC.home} />
+          <div style={{ color: SC.muted, fontSize: 12, textAlign: 'center', marginTop: 4 }}>Tap ＋ or − to adjust each team's score.</div>
+        </div>
+      </>
     );
   } else {
     body = (
