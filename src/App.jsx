@@ -716,6 +716,26 @@ function Scorecard({ onExit }) {
     setInn((prev) => { const x = [...prev]; x[0] = Math.max(0, (x[0] || 0) + delta); return x; });
   };
 
+  // Manual run correction for the detailed scorer. ＋ adds to the current inning;
+  // − removes from the current inning if it has runs, else from the latest earlier
+  // inning that does, so − always lowers the total when it's > 0. Snapshots first so
+  // UNDO reverts it like any play. Raw correction: bypasses the run cap, leaves HR/outs.
+  const adjustRun = (side, delta) => {
+    const cur = side === 'away' ? awayInn : homeInn;
+    const setInn = side === 'away' ? setAwayInn : setHomeInn;
+    if (delta < 0 && sumArr(cur) <= 0) return; // nothing to remove
+    snapshot();
+    setInn((prev) => {
+      const x = [...prev];
+      if (delta > 0) { x[inning - 1] = (x[inning - 1] || 0) + 1; }
+      else {
+        const i = (x[inning - 1] || 0) > 0 ? inning - 1 : x.reduce((acc, v, j) => (v > 0 ? j : acc), -1);
+        if (i >= 0) x[i] = Math.max(0, x[i] - 1);
+      }
+      return x;
+    });
+  };
+
   const startGame = () => {
     setAwayInn(emptyInnings(innings)); setHomeInn(emptyInnings(innings));
     setAwayHR(0); setHomeHR(0); setInning(1); setHalf('top');
@@ -832,13 +852,21 @@ function Scorecard({ onExit }) {
   const newGame = () => { phase === 'game' ? ask('Start a new game?', 'The current game will be cleared.', () => setPhase('setup')) : setPhase('setup'); };
 
   // ---- shared UI ----
-  const Score = ({ name, runs, hr, color, active, right }) => (
+  const Score = ({ name, runs, hr, color, active, right, onPlus, onMinus, minusDisabled }) => (
     <div style={{ flex: 1, textAlign: right ? 'right' : 'left' }}>
       <div style={{ fontSize: 15, fontWeight: 700, color, letterSpacing: 0.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
         {name}{active ? '  •' : ''}
       </div>
       <div style={{ fontSize: 82, fontWeight: 900, color: SC.text, lineHeight: '84px' }}>{runs}</div>
       <div style={{ fontSize: 13, fontWeight: 600, color: SC.muted }}>HR {hr}/{hrLimit}</div>
+      {onPlus && (
+        <div style={{ display: 'flex', gap: 8, marginTop: 8, justifyContent: right ? 'flex-end' : 'flex-start' }}>
+          <button className="tap" onClick={onMinus} disabled={minusDisabled} aria-label={`subtract run for ${name}`}
+            style={{ width: 40, height: 40, borderRadius: 10, border: `1.5px solid ${SC.border}`, background: SC.surface2, color: SC.text, fontSize: 22, fontWeight: 900, lineHeight: 1, cursor: minusDisabled ? 'default' : 'pointer', opacity: minusDisabled ? 0.35 : 1 }}>−</button>
+          <button className="tap" onClick={onPlus} aria-label={`add run for ${name}`}
+            style={{ width: 40, height: 40, borderRadius: 10, border: 'none', background: color, color: '#06231A', fontSize: 22, fontWeight: 900, lineHeight: 1, cursor: 'pointer' }}>＋</button>
+        </div>
+      )}
     </div>
   );
 
@@ -1056,7 +1084,8 @@ function Scorecard({ onExit }) {
         />
         <div style={{ padding: 18 }}>
           <div style={SS.scoreboard}>
-            <Score name={aName} runs={awayRuns} hr={awayHR} color={SC.away} active={isAway} />
+            <Score name={aName} runs={awayRuns} hr={awayHR} color={SC.away} active={isAway}
+              onPlus={() => adjustRun('away', 1)} onMinus={() => adjustRun('away', -1)} minusDisabled={awayRuns <= 0} />
             <div style={{ textAlign: 'center', padding: '0 6px', minWidth: 92 }}>
               <div style={{ color: battingColor, fontSize: 12, fontWeight: 800, letterSpacing: 1 }}>{isAway ? '▲ TOP' : '▼ BOT'}</div>
               <div style={{ color: SC.text, fontSize: 28, fontWeight: 900, lineHeight: '30px' }}>{ordinal(inning)}</div>
@@ -1065,7 +1094,8 @@ function Scorecard({ onExit }) {
                 {isLastHalf ? 'FINISH ▸' : half === 'top' ? `BOT ${ordinal(inning)} ▸` : `TOP ${ordinal(inning + 1)} ▸`}
               </button>
             </div>
-            <Score name={hName} runs={homeRuns} hr={homeHR} color={SC.home} active={!isAway} right />
+            <Score name={hName} runs={homeRuns} hr={homeHR} color={SC.home} active={!isAway} right
+              onPlus={() => adjustRun('home', 1)} onMinus={() => adjustRun('home', -1)} minusDisabled={homeRuns <= 0} />
           </div>
 
           <div style={{ ...SS.card, borderColor: battingColor }}>
