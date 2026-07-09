@@ -851,6 +851,18 @@ function Scorecard({ onExit }) {
   const endGame = () => ask('End game now?', 'This ends the game and shows the final score.', () => setPhase('over'));
   const newGame = () => { phase === 'game' ? ask('Start a new game?', 'The current game will be cleared.', () => setPhase('setup')) : setPhase('setup'); };
 
+  // A half-inning-ending note whose "Next" is a real button — used for both the
+  // 3-outs and run-cap-reached cases so either can change sides with one tap.
+  const nextNote = (msg) => (
+    <div style={{ ...SS.note, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, flexWrap: 'wrap' }}>
+      <span>{msg}</span>
+      <button className="tap" onClick={onNext}
+        style={{ border: 'none', borderRadius: 999, padding: '7px 16px', background: isLastHalf ? SC.danger : SC.run, color: isLastHalf ? '#2A0606' : '#06231A', fontSize: 13, fontWeight: 900, letterSpacing: 0.5, cursor: 'pointer' }}>
+        {isLastHalf ? 'FINISH ▸' : 'NEXT HALF-INNING ▸'}
+      </button>
+    </div>
+  );
+
   // ---- shared UI ----
   const Score = ({ name, runs, hr, color, active, right, onPlus, onMinus, minusDisabled }) => (
     <div style={{ flex: 1, textAlign: right ? 'right' : 'left' }}>
@@ -1159,16 +1171,8 @@ function Scorecard({ onExit }) {
               </div>
             </div>
 
-            {!isOpenInning && runCapReached && <div style={SS.note}>{runCapPerInning}-run limit reached this inning — tap Next.</div>}
-            {outs >= OUTS_PER_HALF && (
-              <div style={{ ...SS.note, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, flexWrap: 'wrap' }}>
-                <span>3 outs —</span>
-                <button className="tap" onClick={onNext}
-                  style={{ border: 'none', borderRadius: 999, padding: '7px 16px', background: isLastHalf ? SC.danger : SC.run, color: isLastHalf ? '#2A0606' : '#06231A', fontSize: 13, fontWeight: 900, letterSpacing: 0.5, cursor: 'pointer' }}>
-                  {isLastHalf ? 'FINISH ▸' : 'NEXT HALF-INNING ▸'}
-                </button>
-              </div>
-            )}
+            {!isOpenInning && runCapReached && nextNote(`${runCapPerInning}-run limit reached this inning —`)}
+            {outs >= OUTS_PER_HALF && nextNote('3 outs —')}
 
             <button className="tap" onClick={undo} disabled={!canUndo}
               style={{ width: '100%', border: `1.5px solid ${SC.muted}`, borderRadius: 12, padding: '12px 0', marginTop: 14, background: 'none', color: SC.text, fontSize: 15, fontWeight: 800, letterSpacing: 1, cursor: 'pointer', opacity: canUndo ? 1 : 0.35 }}>
