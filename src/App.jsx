@@ -1160,7 +1160,15 @@ function Scorecard({ onExit }) {
             </div>
 
             {!isOpenInning && runCapReached && <div style={SS.note}>{runCapPerInning}-run limit reached this inning — tap Next.</div>}
-            {outs >= OUTS_PER_HALF && <div style={SS.note}>3 outs — tap Next half-inning.</div>}
+            {outs >= OUTS_PER_HALF && (
+              <div style={{ ...SS.note, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <span>3 outs —</span>
+                <button className="tap" onClick={onNext}
+                  style={{ border: 'none', borderRadius: 999, padding: '7px 16px', background: isLastHalf ? SC.danger : SC.run, color: isLastHalf ? '#2A0606' : '#06231A', fontSize: 13, fontWeight: 900, letterSpacing: 0.5, cursor: 'pointer' }}>
+                  {isLastHalf ? 'FINISH ▸' : 'NEXT HALF-INNING ▸'}
+                </button>
+              </div>
+            )}
 
             <button className="tap" onClick={undo} disabled={!canUndo}
               style={{ width: '100%', border: `1.5px solid ${SC.muted}`, borderRadius: 12, padding: '12px 0', marginTop: 14, background: 'none', color: SC.text, fontSize: 15, fontWeight: 800, letterSpacing: 1, cursor: 'pointer', opacity: canUndo ? 1 : 0.35 }}>
