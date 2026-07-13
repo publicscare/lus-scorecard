@@ -578,6 +578,7 @@ function Scorecard({ onExit }) {
   const [half, setHalf] = useState('top');
   const [hrThisHalf, setHrThisHalf] = useState(0);
   const [outs, setOuts] = useState(0);
+  const [timeExpired, setTimeExpired] = useState(false); // time limit reached → unlimited runs/inning (HR still limited)
   const [bases, setBases] = useState({ first: false, second: false, third: false });
   const [history, setHistory] = useState([]);
   const [confirm, setConfirm] = useState(null);
@@ -605,7 +606,7 @@ function Scorecard({ onExit }) {
   const setBattingHR = isAway ? setAwayHR : setHomeHR;
 
   const cellRuns = battingInn[inning - 1] ?? 0;
-  const isOpenInning = openLastInning && inning === innings;
+  const isOpenInning = timeExpired || (openLastInning && inning === innings);
   const runCap = isOpenInning ? Infinity : runCapPerInning;
   const runCapReached = cellRuns >= runCap;
   const atHrLimit = battingHR >= hrLimit;
@@ -681,6 +682,7 @@ function Scorecard({ onExit }) {
           if (g.half === 'top' || g.half === 'bottom') setHalf(g.half);
           if (Number.isFinite(g.hrThisHalf)) setHrThisHalf(g.hrThisHalf);
           if (Number.isFinite(g.outs)) setOuts(g.outs);
+          if (typeof g.timeExpired === 'boolean') setTimeExpired(g.timeExpired);
           if (g.bases && typeof g.bases === 'object') setBases({ first: !!g.bases.first, second: !!g.bases.second, third: !!g.bases.third });
           if (Array.isArray(g.history)) setHistory(g.history);
           if (typeof g.gameCode === 'string') setGameCode(g.gameCode);
@@ -696,10 +698,10 @@ function Scorecard({ onExit }) {
     try {
       localStorage.setItem(SC_STORE_KEY, JSON.stringify({
         phase, scoreMode, settings, awayName, homeName, awayInn, homeInn,
-        awayHR, homeHR, inning, half, hrThisHalf, outs, bases, history, gameCode,
+        awayHR, homeHR, inning, half, hrThisHalf, outs, timeExpired, bases, history, gameCode,
       }));
     } catch (e) {}
-  }, [hydrated, phase, scoreMode, settings, awayName, homeName, awayInn, homeInn, awayHR, homeHR, inning, half, hrThisHalf, outs, bases, history, gameCode]);
+  }, [hydrated, phase, scoreMode, settings, awayName, homeName, awayInn, homeInn, awayHR, homeHR, inning, half, hrThisHalf, outs, timeExpired, bases, history, gameCode]);
 
   const ask = (title, message, onConfirm, opts = {}) => setConfirm({ title, message, onConfirm, onCancel: opts.onCancel, confirmLabel: opts.confirmLabel, cancelLabel: opts.cancelLabel });
   const bumpCell = (n) =>
@@ -739,7 +741,7 @@ function Scorecard({ onExit }) {
   const startGame = () => {
     setAwayInn(emptyInnings(innings)); setHomeInn(emptyInnings(innings));
     setAwayHR(0); setHomeHR(0); setInning(1); setHalf('top');
-    setHrThisHalf(0); setOuts(0); setBases(noRunners); setHistory([]); setGameCode(makeCode()); setPhase('game');
+    setHrThisHalf(0); setOuts(0); setBases(noRunners); setHistory([]); setTimeExpired(false); setGameCode(makeCode()); setPhase('game');
   };
 
   const canUndo = history.length > 0;
@@ -850,6 +852,17 @@ function Scorecard({ onExit }) {
   };
   const endGame = () => ask('End game now?', 'This ends the game and shows the final score.', () => setPhase('over'));
   const newGame = () => { phase === 'game' ? ask('Start a new game?', 'The current game will be cleared.', () => setPhase('setup')) : setPhase('setup'); };
+
+  // Time limit reached: lift the per-inning run cap for the rest of the game
+  // (HR limit is unaffected). Reversible in case of a mis-tap; both directions confirm.
+  const toggleTimeExpired = () => {
+    if (timeExpired)
+      ask('Turn off open scoring?', `Runs per inning will be capped again at ${runCapPerInning}. Use this only if it was enabled by mistake.`,
+          () => setTimeExpired(false), { confirmLabel: 'TURN OFF', cancelLabel: 'KEEP ON' });
+    else
+      ask('Time limit reached?', 'Every inning now allows unlimited runs for the rest of the game. The home-run limit still applies.',
+          () => setTimeExpired(true), { confirmLabel: 'OPEN SCORING', cancelLabel: 'CANCEL' });
+  };
 
   // A half-inning-ending note whose "Next" is a real button — used for both the
   // 3-outs and run-cap-reached cases so either can change sides with one tap.
@@ -1170,6 +1183,16 @@ function Scorecard({ onExit }) {
                 ))}
               </div>
             </div>
+
+            <button className="tap" onClick={toggleTimeExpired}
+              style={{ width: '100%', marginTop: 12, borderRadius: 12, padding: '11px 0', cursor: 'pointer', border: `1.5px solid ${timeExpired ? SC.run : SC.border}`, background: timeExpired ? SC.run + '22' : 'none' }}>
+              <div style={{ color: timeExpired ? SC.run : SC.text, fontSize: 14, fontWeight: 900, letterSpacing: 0.5 }}>
+                {timeExpired ? '⏱ OPEN SCORING ON' : '⏱ TIME LIMIT — OPEN SCORING'}
+              </div>
+              <div style={{ color: timeExpired ? SC.run : SC.muted, fontSize: 11, fontWeight: 700, opacity: 0.85, marginTop: 2 }}>
+                {timeExpired ? 'unlimited runs · HR limit still applies · tap to undo' : 'unlimited runs per inning · HR limit unaffected'}
+              </div>
+            </button>
 
             {!isOpenInning && runCapReached && nextNote(`${runCapPerInning}-run limit reached this inning —`)}
             {outs >= OUTS_PER_HALF && nextNote('3 outs —')}
